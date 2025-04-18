@@ -1,0 +1,7 @@
+Metric,GBM Model,GARCH Model
+Probability of Positive Delta (Day 30),0.00%,29.81%
+"Mean Delta (Day 30, $ Billions)",-174.55,-210.40
+"Median Delta (Day 30, $ Billions)",-174.55,-192.45
+5th Percentile ($ Billions),-175.22,-860.01
+95th Percentile ($ Billions),-173.87,373.39
+Standard Deviation ($ Billions),0.41,375.28
