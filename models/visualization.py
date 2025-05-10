@@ -1,4 +1,3 @@
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -9,512 +8,1045 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.express as px
 from scipy.stats import gaussian_kde
-PLOTLY_AVAILABLE = True
+from .utils import calculate_conf_intervals
 
-def create_scenario_grid_plot(
-    valid_scenarios: List[int],
-    spy_scenarios: np.ndarray,
-    spy_returns: np.ndarray,
-    scenario_tolerance: float,
-    market_caps: np.ndarray,
-    prices: np.ndarray,
-    ticker_indices: Dict[str, int],
-    valuation_gaps: np.ndarray,
-    output_dir: str,
+# Check if plotly is available
+try:
+    import plotly
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
+
+
+def create_delta_visualization(
+    gbm_delta_caps,
+    garch_delta_caps,
+    trading_dates,
+    output_dir,
+    display_paths=100,
+    confidence=0.9,
     show_plot: bool = False
-) -> None:
+):
     """
-    Create grid of scenario plots for valid scenarios
+    Create visualizations comparing GBM and GARCH valuation deltas
     
     Args:
-        valid_scenarios: Indices of valid scenarios
-        spy_scenarios: Array of SPY return scenarios
-        spy_returns: Array of SPY returns from simulation
-        scenario_tolerance: Tolerance around target SPY return
-        market_caps: Array of market caps from simulation
-        prices: Array of prices from simulation
-        ticker_indices: Dictionary mapping ticker to index
-        valuation_gaps: Array of valuation gaps
-        output_dir: Directory to save output files
+        gbm_delta_caps: Delta market caps from GBM simulations [days+1, simulations]
+        garch_delta_caps: Delta market caps from GARCH simulations [days+1, simulations]
+        trading_dates: List of trading dates
+        output_dir: Directory to save output
+        display_paths: Number of individual paths to display
+        confidence: Confidence level for intervals (0-1)
         show_plot: Whether to display the plot in a popup window
     """
-    # Set style
-    sns.set(style="whitegrid")
+    # Format dates for x-axis
+    date_strings = [d.strftime('%Y-%m-%d') for d in trading_dates]
     
-    # Determine grid size - use max 4 columns
-    num_scenarios = len(valid_scenarios)
-    if num_scenarios <= 4:
-        rows, cols = 1, num_scenarios
-    else:
-        cols = 4
-        rows = (num_scenarios + cols - 1) // cols
+    # Calculate confidence intervals and statistics
+    gbm_lower, gbm_median, gbm_upper, gbm_mean = calculate_conf_intervals(gbm_delta_caps, confidence)
+    garch_lower, garch_median, garch_upper, garch_mean = calculate_conf_intervals(garch_delta_caps, confidence)
     
-    # Select 15 representative scenarios at most to avoid overcrowding
-    if num_scenarios > 15:
-        # Choose scenarios spaced evenly
-        step = num_scenarios // 15
-        valid_scenarios = valid_scenarios[::step]
-        num_scenarios = len(valid_scenarios)
-        # Recalculate grid
-        if num_scenarios <= 4:
-            rows, cols = 1, num_scenarios
-        else:
-            cols = 4
-            rows = (num_scenarios + cols - 1) // cols
+    # Calculate probability of MSFT > AAPL at each time point
+    prob_gbm_positive = np.mean(gbm_delta_caps > 0, axis=1)
+    prob_garch_positive = np.mean(garch_delta_caps > 0, axis=1)
     
-    # Create figure
-    fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 3*rows))
+    # Create figure with multiple subplots
+    fig, axes = plt.subplots(2, 2, figsize=(20, 16))
     
-    # If we have only one scenario, axes is not a 2D array
-    if num_scenarios == 1:
-        axes = np.array([[axes]])
-    elif rows == 1:
-        axes = axes.reshape(1, -1)
-        
-    # ticker indices
-    msft_idx = ticker_indices['MSFT']
-    aapl_idx = ticker_indices['AAPL']
+    # Plot 1: GBM Mean with confidence intervals and sample paths
+    ax = axes[0, 0]
+    ax.fill_between(range(len(trading_dates)), gbm_lower, gbm_upper, alpha=0.3, color='blue', label=f'{confidence*100:.0f}% Confidence Interval')
+    ax.plot(gbm_median, color='blue', linestyle='--', label='Median (GBM)', linewidth=2)
+    ax.plot(gbm_mean, color='darkblue', label='Mean (GBM)', linewidth=2)
     
-    # Plot each scenario
-    for i, scenario_idx in enumerate(valid_scenarios):
-        row, col = divmod(i, cols)
-        ax = axes[row, col]
-        
-        target_return = spy_scenarios[scenario_idx]
-        lower_bound = target_return - scenario_tolerance
-        upper_bound = target_return + scenario_tolerance
-        
-        # Create mask for paths where SPY return is within tolerance
-        mask = (spy_returns >= lower_bound) & (spy_returns <= upper_bound)
-        
-        # Calculate probability of AAPL having higher valuation than MSFT
-        p_aapl_gt_msft = np.mean(valuation_gaps[mask] < 0)
-        
-        # Calculate average valuation gap
-        avg_val_gap = np.mean(valuation_gaps[mask])
-        
-        # Extract returns for each company
-        msft_rel_perf = prices[msft_idx, -1, mask] / prices[msft_idx, 0, mask] - 1
-        aapl_rel_perf = prices[aapl_idx, -1, mask] / prices[aapl_idx, 0, mask] - 1
-        
-        sns.histplot(msft_rel_perf, color='blue', alpha=0.6, label='MSFT', ax=ax, kde=True)
-        sns.histplot(aapl_rel_perf, color='green', alpha=0.6, label='AAPL', ax=ax, kde=True)
-        ax.axvline(x=np.mean(msft_rel_perf), color='blue', linestyle='--')
-        ax.axvline(x=np.mean(aapl_rel_perf), color='green', linestyle='--')
-        
-        # Format plot
-        ax.set_title(f"SPY {target_return*100:+.1f}%")
-        ax.set_xlabel("Return")
-        
-        # Add stats in bottom left
-        stats_text = (f"P(AAPL>MSFT): {p_aapl_gt_msft:.2f}\n"
-                    f"Avg Gap: ${avg_val_gap:.1f}B\n"
-                    f"MSFT: {np.mean(msft_rel_perf)*100:.1f}%\n"
-                    f"AAPL: {np.mean(aapl_rel_perf)*100:.1f}%")
-                    
-        ax.text(0.05, 0.05, stats_text, transform=ax.transAxes,
-                fontsize=8, verticalalignment='bottom', 
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    # Add zero line
+    ax.axhline(y=0, color='red', linestyle='-', alpha=0.7, linewidth=1.5, label='Zero Line')
     
-    # Hide unused axes
-    for i in range(len(valid_scenarios), rows*cols):
-        row, col = divmod(i, cols)
-        axes[row, col].axis('off')
+    # Add sample paths
+    gbm_path_indices = np.random.choice(gbm_delta_caps.shape[1], min(display_paths, gbm_delta_caps.shape[1]), replace=False)
+    for i in gbm_path_indices:
+        ax.plot(gbm_delta_caps[:, i], color='lightblue', alpha=0.1)
     
-    # Add a common legend
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='lower center', ncol=2)
+    ax.set_title('GBM: MSFT-AAPL Market Cap Delta ($ Billions)', fontsize=14)
+    ax.set_xlabel('Date', fontsize=12)
+    ax.set_ylabel('Market Cap Delta ($ Billions)', fontsize=12)
+    ax.set_xticks(range(0, len(trading_dates), 5))
+    ax.set_xticklabels([date_strings[i] for i in range(0, len(date_strings), 5)], rotation=45)
+    ax.grid(alpha=0.3)
+    ax.legend()
     
-    # Adjust layout and save
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.suptitle("MSFT vs AAPL Returns Under Different SPY Scenarios", fontsize=16)
-    plt.subplots_adjust(bottom=0.1)
+    # Plot 2: GARCH Mean with confidence intervals and sample paths
+    ax = axes[0, 1]
+    ax.fill_between(range(len(trading_dates)), garch_lower, garch_upper, alpha=0.3, color='green', label=f'{confidence*100:.0f}% Confidence Interval')
+    ax.plot(garch_median, color='green', linestyle='--', label='Median (GARCH)', linewidth=2)
+    ax.plot(garch_mean, color='darkgreen', label='Mean (GARCH)', linewidth=2)
     
-    # Save the figure
-    plt.savefig(f"{output_dir}/scenario_grid.png", dpi=300, bbox_inches='tight')
+    # Add zero line
+    ax.axhline(y=0, color='red', linestyle='-', alpha=0.7, linewidth=1.5, label='Zero Line')
     
-    # Show plot if requested
-    if show_plot:
-        plt.show()
-    else:
-        plt.close()
-
-
-def create_3d_probability_plot(
-    spy_returns: np.ndarray,
-    valuation_gaps: np.ndarray,
-    output_dir: str,
-    show_plot: bool = False
-) -> None:
-    """
-    Create 3D probability surface plot
+    # Add sample paths
+    garch_path_indices = np.random.choice(garch_delta_caps.shape[1], min(display_paths, garch_delta_caps.shape[1]), replace=False)
+    for i in garch_path_indices:
+        ax.plot(garch_delta_caps[:, i], color='lightgreen', alpha=0.1)
     
-    Args:
-        spy_returns: Array of SPY returns
-        valuation_gaps: Array of valuation gaps
-        output_dir: Directory to save output files
-        show_plot: Whether to display plot in popup window
-    """
-    if not PLOTLY_AVAILABLE:
-        print("Plotly not available, skipping 3D probability plot")
-        return
-        
-    # Create 2D histogram
-    H, xedges, yedges = np.histogram2d(
-        spy_returns, 
-        valuation_gaps,
-        bins=[50, 50],
-        density=True
+    ax.set_title('GARCH: MSFT-AAPL Market Cap Delta ($ Billions)', fontsize=14)
+    ax.set_xlabel('Date', fontsize=12)
+    ax.set_ylabel('Market Cap Delta ($ Billions)', fontsize=12)
+    ax.set_xticks(range(0, len(trading_dates), 5))
+    ax.set_xticklabels([date_strings[i] for i in range(0, len(date_strings), 5)], rotation=45)
+    ax.grid(alpha=0.3)
+    ax.legend()
+    
+    # Plot 3: Probability of positive delta over time comparison
+    ax = axes[1, 0]
+    ax.plot(prob_gbm_positive, color='blue', label='GBM Model', linewidth=2)
+    ax.plot(prob_garch_positive, color='green', label='GARCH Model', linewidth=2)
+    ax.axhline(y=0.5, color='red', linestyle='--', alpha=0.7, label='50% Probability')
+    
+    ax.set_title('Probability of MSFT Market Cap > AAPL Market Cap', fontsize=14)
+    ax.set_xlabel('Date', fontsize=12)
+    ax.set_ylabel('Probability', fontsize=12)
+    ax.set_ylim(0, 1)
+    ax.set_xticks(range(0, len(trading_dates), 5))
+    ax.set_xticklabels([date_strings[i] for i in range(0, len(date_strings), 5)], rotation=45)
+    ax.grid(alpha=0.3)
+    ax.legend()
+    
+    # Plot 4: Histogram of terminal values
+    ax = axes[1, 1]
+    terminal_gbm = gbm_delta_caps[-1, :]
+    terminal_garch = garch_delta_caps[-1, :]
+    
+    sns.histplot(terminal_gbm, ax=ax, color='blue', alpha=0.5, label='GBM', kde=True)
+    sns.histplot(terminal_garch, ax=ax, color='green', alpha=0.5, label='GARCH', kde=True)
+    ax.axvline(x=0, color='red', linestyle='-', alpha=0.7, label='Zero Line')
+    
+    # Add text with probabilities
+    prob_gbm_positive_final = np.mean(terminal_gbm > 0)
+    prob_garch_positive_final = np.mean(terminal_garch > 0)
+    
+    ax.text(0.05, 0.95, 
+        f"GBM: P(MSFT > AAPL) = {prob_gbm_positive_final:.2%}\n"
+        f"GARCH: P(MSFT > AAPL) = {prob_garch_positive_final:.2%}",
+        transform=ax.transAxes, 
+        bbox=dict(boxstyle="round,pad=0.5", facecolor='white', alpha=0.8),
+        verticalalignment='top'
     )
     
-    # Calculate bin centers
-    x_centers = (xedges[:-1] + xedges[1:]) / 2
-    y_centers = (yedges[:-1] + yedges[1:]) / 2
-    
-    # Create meshgrid for surface plot
-    X, Y = np.meshgrid(x_centers, y_centers)
-    Z = H.T  # Transpose H to match meshgrid orientation
-    
-    # Create plotly figure
-    fig = go.Figure(data=[go.Surface(z=Z, x=X, y=Y, colorscale='Viridis')])
-    
-    # Calculate probability of AAPL > MSFT based on SPY return
-    spy_bins = np.linspace(np.min(spy_returns), np.max(spy_returns), 20)
-    prob_aapl_gt_msft = []
-    
-    for i in range(len(spy_bins)-1):
-        lower, upper = spy_bins[i], spy_bins[i+1]
-        mask = (spy_returns >= lower) & (spy_returns <= upper)
-        if np.sum(mask) > 10:  # Require at least 10 samples
-            prob = np.mean(valuation_gaps[mask] < 0)
-            prob_aapl_gt_msft.append((np.mean([lower, upper]), prob))
-    
-    # Update layout WITHOUT the problematic 3D annotations
-    fig.update_layout(
-        title='Joint Probability Distribution: SPY Returns vs Valuation Gap',
-        scene=dict(
-            xaxis_title='SPY Return',
-            yaxis_title='MSFT-AAPL Valuation Gap ($B)',
-            zaxis_title='Probability Density'
-        ),
-        margin=dict(l=0, r=0, b=0, t=30),
-        scene_camera=dict(
-            eye=dict(x=1.5, y=-1.5, z=1)
-        )
-    )
-    
-    # Save as HTML file
-    fig.write_html(f"{output_dir}/3d_probability_surface.html")
-    
-    # Create 2D contour plot
-    contour_fig = go.Figure(data=
-        go.Contour(
-            z=Z,
-            x=x_centers, 
-            y=y_centers,
-            colorscale='Viridis',
-            contours=dict(
-                showlabels=True,
-                labelfont=dict(size=12, color='white')
-            )
-        )
-    )
-    
-    # Add scatter for probability by SPY return
-    if prob_aapl_gt_msft:
-        x_vals, probs = zip(*prob_aapl_gt_msft)
-        contour_fig.add_trace(
-            go.Scatter(
-                x=x_vals,
-                y=[0 for _ in x_vals],  # Place at y=0
-                text=[f"{p:.2f}" for p in probs],
-                mode="markers+text",
-                name="P(AAPL>MSFT)",
-                marker=dict(color="red", size=8),
-                textposition="top center"
-            )
-        )
-    
-    # Update layout for contour plot
-    contour_fig.update_layout(
-        title='Probability Contours: SPY Returns vs Valuation Gap',
-        xaxis_title='SPY Return',
-        yaxis_title='MSFT-AAPL Valuation Gap ($B)',
-        yaxis=dict(zeroline=True, zerolinecolor='red', zerolinewidth=2),
-        xaxis=dict(zeroline=True, zerolinecolor='red', zerolinewidth=2)
-    )
-    
-    # Save contour plot
-    contour_fig.write_html(f"{output_dir}/probability_contour.html")
-    
-    # Show plots if requested
-    if show_plot:
-        fig.show()
-        contour_fig.show()
-
-
-def create_regime_correlation_plots(
-    spy_returns: np.ndarray,
-    msft_returns: np.ndarray,
-    aapl_returns: np.ndarray,
-    min_spy_return: float,
-    max_spy_return: float,
-    output_dir: str,
-    show_plot: bool = False
-) -> None:
-    """
-    Create correlation plots under different market regimes
-    
-    Args:
-        spy_returns: Array of SPY returns
-        msft_returns: Array of MSFT returns
-        aapl_returns: Array of AAPL returns
-        min_spy_return: Minimum SPY return
-        max_spy_return: Maximum SPY return
-        output_dir: Directory to save output files
-        show_plot: Whether to display plot in popup window
-    """
-    # Create regime bins
-    thresholds = np.linspace(min_spy_return, max_spy_return, 7)  # 6 regimes
-    regime_names = [f"{thresholds[i]:.1%} to {thresholds[i+1]:.1%}" 
-                   for i in range(len(thresholds)-1)]
-    
-    # Create figure
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    axes = axes.flatten()
-    
-    for i in range(len(regime_names)):
-        ax = axes[i]
-        mask = (spy_returns >= thresholds[i]) & (spy_returns < thresholds[i+1])
-        
-        if np.sum(mask) < 50:  # Need enough points for meaningful correlation
-            ax.text(0.5, 0.5, f"Insufficient data\n({np.sum(mask)} points)", 
-                   ha='center', va='center', transform=ax.transAxes, fontsize=12)
-            ax.set_title(regime_names[i])
-            continue
-        
-        # Calculate correlation
-        msft_aapl_corr = np.corrcoef(msft_returns[mask], aapl_returns[mask])[0, 1]
-        
-        # Create scatter
-        ax.scatter(msft_returns[mask], aapl_returns[mask], alpha=0.5)
-        ax.axline([0, 0], [1, 1], color='red', linestyle='--')
-        
-        # Add best fit line
-        if np.sum(mask) > 2:  # Need at least 3 points for regression
-            m, b = np.polyfit(msft_returns[mask], aapl_returns[mask], 1)
-            x_line = np.array([np.min(msft_returns[mask]), np.max(msft_returns[mask])])
-            y_line = m * x_line + b
-            ax.plot(x_line, y_line, color='green')
-        
-        ax.set_title(f"{regime_names[i]}\nCorr: {msft_aapl_corr:.2f}")
-        ax.set_xlabel('MSFT Return')
-        ax.set_ylabel('AAPL Return')
-        
-        # Add point count
-        ax.text(0.05, 0.95, f"n = {np.sum(mask)}", transform=ax.transAxes, 
-               verticalalignment='top')
+    ax.set_title('Distribution of Terminal Values (Day 30)', fontsize=14)
+    ax.set_xlabel('Market Cap Delta ($ Billions)', fontsize=12)
+    ax.set_ylabel('Frequency', fontsize=12)
+    ax.grid(alpha=0.3)
+    ax.legend()
     
     plt.tight_layout()
-    plt.suptitle("MSFT-AAPL Return Correlation by SPY Regime", fontsize=16)
-    plt.subplots_adjust(top=0.92)
-    
-    # Save the figure
-    plt.savefig(f"{output_dir}/regime_correlations.png", dpi=300, bbox_inches='tight')
-    
-    # Show plot if requested
+    plt.savefig(f"{output_dir}/gbm_vs_garch_comparison.png", dpi=300)
     if show_plot:
         plt.show()
-    else:
-        plt.close()
-
-
-def create_summary_table(valid_results, output_dir):
-    """Create a summary table of scenario results"""
-    plt.figure(figsize=(12, len(valid_results) * 0.5 + 1))
+    
+    # Create interactive Plotly visualization if available
+    if PLOTLY_AVAILABLE:
+        try:
+            # Create figure for interactive plot
+            interactive_fig = make_subplots(
+                rows=2, cols=2,
+                subplot_titles=(
+                    "GBM: Market Cap Delta Projection",
+                    "GARCH: Market Cap Delta Projection",
+                    "Probability of MSFT > AAPL Over Time",
+                    "Terminal Value Distribution (Day 30)"
+                )
+            )
+            
+            # Add GBM confidence interval
+            interactive_fig.add_trace(
+                go.Scatter(
+                    x=date_strings,
+                    y=gbm_upper,
+                    fill=None,
+                    mode='lines',
+                    line=dict(color='rgba(0, 0, 255, 0)'),
+                    showlegend=False
+                ),
+                row=1, col=1
+            )
+            
+            interactive_fig.add_trace(
+                go.Scatter(
+                    x=date_strings,
+                    y=gbm_lower,
+                    fill='tonexty',
+                    mode='lines',
+                    line=dict(color='rgba(0, 0, 255, 0)'),
+                    fillcolor='rgba(0, 0, 255, 0.2)',
+                    name='GBM 90% Confidence Interval'
+                ),
+                row=1, col=1
+            )
+            
+            # Add GBM mean
+            interactive_fig.add_trace(
+                go.Scatter(
+                    x=date_strings,
+                    y=gbm_mean,
+                    mode='lines',
+                    line=dict(color='blue', width=2),
+                    name='GBM Mean'
+                ),
+                row=1, col=1
+            )
+            
+            # Add GBM zero line
+            interactive_fig.add_trace(
+                go.Scatter(
+                    x=date_strings,
+                    y=np.zeros(len(trading_dates)),
+                    mode='lines',
+                    line=dict(color='red', width=1, dash='dash'),
+                    name='Zero Line'
+                ),
+                row=1, col=1
+            )
+            
+            # Add GARCH confidence interval
+            interactive_fig.add_trace(
+                go.Scatter(
+                    x=date_strings,
+                    y=garch_upper,
+                    fill=None,
+                    mode='lines',
+                    line=dict(color='rgba(0, 128, 0, 0)'),
+                    showlegend=False
+                ),
+                row=1, col=2
+            )
+            
+            interactive_fig.add_trace(
+                go.Scatter(
+                    x=date_strings,
+                    y=garch_lower,
+                    fill='tonexty',
+                    mode='lines',
+                    line=dict(color='rgba(0, 128, 0, 0)'),
+                    fillcolor='rgba(0, 128, 0, 0.2)',
+                    name='GARCH 90% Confidence Interval'
+                ),
+                row=1, col=2
+            )
+            
+            # Add GARCH mean
+            interactive_fig.add_trace(
+                go.Scatter(
+                    x=date_strings,
+                    y=garch_mean,
+                    mode='lines',
+                    line=dict(color='green', width=2),
+                    name='GARCH Mean'
+                ),
+                row=1, col=2
+            )
+            
+            # Add GARCH zero line
+            interactive_fig.add_trace(
+                go.Scatter(
+                    x=date_strings,
+                    y=np.zeros(len(trading_dates)),
+                    mode='lines',
+                    line=dict(color='red', width=1, dash='dash'),
+                    name='Zero Line',
+                    showlegend=False
+                ),
+                row=1, col=2
+            )
+            
+            # Add probability comparison
+            interactive_fig.add_trace(
+                go.Scatter(
+                    x=date_strings,
+                    y=prob_gbm_positive,
+                    mode='lines',
+                    line=dict(color='blue', width=2),
+                    name='GBM Probability'
+                ),
+                row=2, col=1
+            )
+            
+            interactive_fig.add_trace(
+                go.Scatter(
+                    x=date_strings,
+                    y=prob_garch_positive,
+                    mode='lines',
+                    line=dict(color='green', width=2),
+                    name='GARCH Probability'
+                ),
+                row=2, col=1
+            )
+            
+            # Add 50% probability line
+            interactive_fig.add_trace(
+                go.Scatter(
+                    x=date_strings,
+                    y=[0.5] * len(trading_dates),
+                    mode='lines',
+                    line=dict(color='red', width=1, dash='dash'),
+                    name='50% Probability',
+                ),
+                row=2, col=1
+            )
+            
+            # Add histogram of terminal values
+            interactive_fig.add_trace(
+                go.Histogram(
+                    x=terminal_gbm,
+                    opacity=0.6,
+                    name='GBM Terminal',
+                    marker_color='blue',
+                    nbinsx=50
+                ),
+                row=2, col=2
+            )
+            
+            interactive_fig.add_trace(
+                go.Histogram(
+                    x=terminal_garch,
+                    opacity=0.6,
+                    name='GARCH Terminal',
+                    marker_color='green',
+                    nbinsx=50
+                ),
+                row=2, col=2
+            )
+            
+            # Add zero line to histogram
+            interactive_fig.add_vline(
+                x=0, 
+                line_width=2, 
+                line_dash="dash", 
+                line_color="red",
+                row=2, col=2
+            )
+            
+            # Update layout
+            interactive_fig.update_layout(
+                title_text="MSFT vs AAPL Market Cap Delta: GBM vs GARCH Comparison",
+                height=900,
+                width=1200,
+                showlegend=True,
+            )
+            
+            # Update axes
+            interactive_fig.update_yaxes(title_text="Market Cap Delta ($ Billions)", row=1, col=1)
+            interactive_fig.update_yaxes(title_text="Market Cap Delta ($ Billions)", row=1, col=2)
+            interactive_fig.update_yaxes(title_text="Probability", row=2, col=1)
+            interactive_fig.update_yaxes(title_text="Frequency", row=2, col=2)
+            
+            interactive_fig.update_xaxes(title_text="Date", row=1, col=1)
+            interactive_fig.update_xaxes(title_text="Date", row=1, col=2)
+            interactive_fig.update_xaxes(title_text="Date", row=2, col=1)
+            interactive_fig.update_xaxes(title_text="Market Cap Delta ($ Billions)", row=2, col=2)
+            
+            # Add annotations with probabilities
+            interactive_fig.add_annotation(
+                text=f"P(MSFT > AAPL) = {prob_gbm_positive_final:.2%}",
+                xref="x4", yref="y4",
+                x=0.8 * min(min(terminal_gbm), min(terminal_garch)),
+                y=0.9 * interactive_fig.data[-1]['y'].max(),
+                showarrow=False,
+                font=dict(color="blue", size=14),
+                bgcolor="white",
+                opacity=0.8,
+                align="left"
+            )
+            
+            interactive_fig.add_annotation(
+                text=f"P(MSFT > AAPL) = {prob_garch_positive_final:.2%}",
+                xref="x4", yref="y4",
+                x=0.8 * min(min(terminal_gbm), min(terminal_garch)),
+                y=0.8 * interactive_fig.data[-1]['y'].max(),
+                showarrow=False,
+                font=dict(color="green", size=14),
+                bgcolor="white",
+                opacity=0.8,
+                align="left"
+            )
+            
+            # Save to HTML file
+            interactive_fig.write_html(f"{output_dir}/gbm_vs_garch_interactive.html")
+            
+        except Exception as e:
+            print(f"Warning: Could not create interactive visualization: {e}")
+    
+    # Create additional comparative table
+    stats = {
+        'Metric': [
+            'Probability of Positive Delta (Day 30)',
+            'Mean Delta (Day 30, $ Billions)',
+            'Median Delta (Day 30, $ Billions)',
+            '5th Percentile ($ Billions)',
+            '95th Percentile ($ Billions)',
+            'Standard Deviation ($ Billions)'
+        ],
+        'GBM Model': [
+            f"{prob_gbm_positive_final:.2%}",
+            f"{gbm_mean[-1]:.2f}",
+            f"{gbm_median[-1]:.2f}",
+            f"{np.percentile(terminal_gbm, 5):.2f}",
+            f"{np.percentile(terminal_gbm, 95):.2f}",
+            f"{np.std(terminal_gbm):.2f}"
+        ],
+        'GARCH Model': [
+            f"{prob_garch_positive_final:.2%}",
+            f"{garch_mean[-1]:.2f}",
+            f"{garch_median[-1]:.2f}",
+            f"{np.percentile(terminal_garch, 5):.2f}",
+            f"{np.percentile(terminal_garch, 95):.2f}",
+            f"{np.std(terminal_garch):.2f}"
+        ]
+    }
+    
+    stats_df = pd.DataFrame(stats)
+    stats_df.to_csv(f"{output_dir}/model_comparison_statistics.csv", index=False)
+    
+    # Create a visual table for the statistics
+    plt.figure(figsize=(10, 6))
     ax = plt.subplot(111, frame_on=False)
     ax.xaxis.set_visible(False)
     ax.yaxis.set_visible(False)
     
-    headers = ["SPY Return", "Probability AAPL > MSFT", "Avg Gap ($B)", "# Paths"]
-    table_data = []
-    
-    for result in valid_results:
-        spy_return = f"{result['SPY_Target']:.2%}"
-        prob = f"{result['P_AAPL_GT_MSFT']:.4f}"
-        gap = f"${result['Avg_ValGap']:.2f}B"
-        paths = f"{result['Paths']}"
-        table_data.append([spy_return, prob, gap, paths])
-    
-    # Use named colors instead of rgba strings
-    table = ax.table(cellText=table_data, colLabels=headers, loc='center', cellLoc='center',
-                    colColours=['lightblue'] * 4, 
-                    rowColours=['lightgreen'] * len(valid_results))
+    table = plt.table(
+        cellText=stats_df.values,
+        colLabels=stats_df.columns,
+        cellLoc='center',
+        loc='center',
+        bbox=[0, 0, 1, 1]
+    )
     
     table.auto_set_font_size(False)
-    table.set_fontsize(10)
+    table.set_fontsize(12)
     table.scale(1, 1.5)
     
-    plt.title('Summary of Scenario Results', fontsize=14)
+    plt.title("Model Comparison: GBM vs GARCH", fontsize=16, pad=20)
     plt.tight_layout()
-    plt.savefig(f"{output_dir}/summary_table.png", bbox_inches='tight', dpi=300)
-    plt.close()
+    plt.savefig(f"{output_dir}/model_comparison_table.png", dpi=300)
+    
+    return {
+        'prob_gbm_positive_final': prob_gbm_positive_final,
+        'prob_garch_positive_final': prob_garch_positive_final
+    }
 
 
-def create_valuation_gap_scatter_plot(
-    spy_returns: np.ndarray,
-    valuation_gaps: np.ndarray,
+def create_3d_probability_plot(
+    spy_returns,
+    valuation_gaps,
     output_dir: str,
     show_plot: bool = False
-) -> None:
+):
     """
-    Create scatter plot of SPY returns vs valuation gaps
+    Create a 3D scatter plot of valuation gap against SPY returns
+    
+    Args:
+        spy_returns: Array of SPY returns
+        valuation_gaps: Array of valuation gaps (MSFT - AAPL)
+        output_dir: Directory to save output
+        show_plot: Whether to display the plot
+    """
+    # Create plot
+    plt.figure(figsize=(12, 8))
+    plt.scatter(spy_returns * 100, valuation_gaps, alpha=0.5)
+    plt.axhline(y=0, color='red', linestyle='--', label='Break-even Line')
+    plt.xlabel('SPY Return (%)', fontsize=12)
+    plt.ylabel('Valuation Gap ($ Billions)', fontsize=12)
+    plt.title('Relationship Between SPY Returns and Valuation Gap', fontsize=14)
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/spy_vs_valuation_gap.png", dpi=300)
+    if show_plot:
+        plt.show()
+
+
+def create_3d_surface_plot(
+    factor_grid,
+    prob_grid,
+    output_dir,
+    factor1_name="MSFT Return",
+    factor2_name="AAPL Return"
+):
+    """
+    Create a 3D surface plot of probability based on two factors
+    
+    Args:
+        factor_grid: 2D grid of factor values (factor1, factor2)
+        prob_grid: 2D grid of probability values
+        output_dir: Directory to save output
+        factor1_name: Name of the first factor (x-axis)
+        factor2_name: Name of the second factor (y-axis)
+    """
+    if not PLOTLY_AVAILABLE:
+        print("Warning: Plotly is not available, skipping 3D surface plot")
+        return
+        
+    try:
+        factor1_vals, factor2_vals = factor_grid
+        
+        fig = go.Figure(data=[
+            go.Surface(
+                z=prob_grid,
+                x=factor1_vals,
+                y=factor2_vals,
+                colorscale='Viridis',
+                colorbar=dict(title="Probability")
+            )
+        ])
+        
+        # Add a plane at z=0.5 to visualize the 50% probability level
+        x_mesh, y_mesh = np.meshgrid(factor1_vals, factor2_vals)
+        z_plane = np.ones_like(x_mesh) * 0.5
+        
+        fig.add_trace(
+            go.Surface(
+                z=z_plane,
+                x=x_mesh,
+                y=y_mesh,
+                showscale=False,
+                opacity=0.3,
+                colorscale=[[0, 'red'], [1, 'red']],
+                name="50% Probability"
+            )
+        )
+        
+        # Update layout
+        fig.update_layout(
+            title='Probability of MSFT > AAPL Market Cap',
+            scene=dict(
+                xaxis_title=factor1_name,
+                yaxis_title=factor2_name,
+                zaxis_title='Probability',
+                xaxis=dict(tickformat='.1%'),
+                yaxis=dict(tickformat='.1%'),
+                zaxis=dict(range=[0, 1])
+            ),
+            width=1000,
+            height=800,
+            margin=dict(l=65, r=50, b=65, t=90),
+        )
+        
+        # Save as HTML
+        fig.write_html(f"{output_dir}/probability_surface.html")
+        
+        # Also create a 2D contour plot for easier interpretation
+        contour_fig = go.Figure(data=
+            go.Contour(
+                z=prob_grid,
+                x=factor1_vals * 100,  # Convert to percentages
+                y=factor2_vals * 100,  # Convert to percentages
+                colorscale='Viridis',
+                contours=dict(
+                    start=0,
+                    end=1,
+                    size=0.05,
+                    showlabels=True,
+                ),
+                colorbar=dict(title="Probability")
+            )
+        )
+        
+        # Add contour line for 50% probability
+        contour_fig.add_trace(
+            go.Contour(
+                z=prob_grid,
+                x=factor1_vals * 100,  # Convert to percentages
+                y=factor2_vals * 100,  # Convert to percentages
+                contours=dict(
+                    start=0.5,
+                    end=0.5,
+                    size=0.1,
+                    showlabels=True,
+                    labelfont=dict(color="white"),
+                ),
+                showscale=False,
+                line=dict(color="red", width=2),
+                name="50% Probability"
+            )
+        )
+        
+        contour_fig.update_layout(
+            title='Probability Contour: P(MSFT Market Cap > AAPL Market Cap)',
+            xaxis_title=f'{factor1_name} (%)',
+            yaxis_title=f'{factor2_name} (%)',
+            width=1000,
+            height=800
+        )
+        
+        contour_fig.write_html(f"{output_dir}/probability_contour.html")
+        
+    except Exception as e:
+        print(f"Warning: Could not create 3D surface plot: {e}")
+
+
+def create_scenario_grid_plot(
+    valid_scenarios,
+    spy_scenarios,
+    spy_returns,
+    scenario_tolerance,
+    market_caps,
+    prices,
+    ticker_indices,
+    valuation_gaps,
+    output_dir,
+    show_plot: bool = False
+):
+    """
+    Create a grid of scenario subplots showing valuation distributions
+    
+    Args:
+        valid_scenarios: List of valid scenario indices
+        spy_scenarios: List of SPY return scenarios
+        spy_returns: Array of SPY returns
+        scenario_tolerance: Tolerance around target SPY return
+        market_caps: Array of market cap simulations
+        prices: Array of price simulations
+        ticker_indices: Dict mapping tickers to indices
+        valuation_gaps: Array of valuation gaps
+        output_dir: Directory to save output
+        show_plot: Whether to display the plot
+    """
+    # Create grid of subplots for valid scenarios
+    n_scenarios = len(valid_scenarios)
+    
+    if n_scenarios <= 0:
+        print("No valid scenarios to plot")
+        return
+    
+    # Create grid layout
+    n_cols = min(3, n_scenarios)
+    n_rows = (n_scenarios + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows))
+    
+    # Ensure axes is iterable for single subplot case
+    if n_scenarios == 1:
+        axes = np.array([axes])
+    
+    # Flatten axes for easy iteration
+    axes = axes.flatten()
+    
+    # Plot each scenario
+    for i, scenario_idx in enumerate(valid_scenarios):
+        if i >= len(axes):
+            break
+            
+        scenario_return = spy_scenarios[scenario_idx]
+        lower_bound = scenario_return - scenario_tolerance
+        upper_bound = scenario_return + scenario_tolerance
+        
+        # Create mask for paths in this scenario
+        mask = (spy_returns >= lower_bound) & (spy_returns <= upper_bound)
+        
+        # Filter paths
+        valuation_gaps_scenario = valuation_gaps[mask]
+        
+        # Create histogram for this scenario
+        axes[i].hist(valuation_gaps_scenario, bins=30, alpha=0.7)
+        axes[i].axvline(x=0, color='red', linestyle='--')
+        axes[i].set_title(f"SPY Return: {scenario_return:.1%}")
+        axes[i].set_xlabel('Valuation Gap ($ Billions)')
+        axes[i].set_ylabel('Frequency')
+        
+        # Add text with probability
+        p_msft_gt_aapl = np.mean(valuation_gaps_scenario > 0)
+        axes[i].text(0.05, 0.95, 
+            f"P(MSFT > AAPL) = {p_msft_gt_aapl:.2%}\n"
+            f"Paths: {np.sum(mask)}",
+            transform=axes[i].transAxes,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8),
+            verticalalignment='top'
+        )
+    
+    # Hide unused axes
+    for i in range(n_scenarios, len(axes)):
+        axes[i].axis('off')
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/scenario_grid.png", dpi=300)
+    if show_plot:
+        plt.show()
+
+
+def create_summary_table(valid_results, output_dir, show_plot: bool = False):
+    """
+    Create a summary table of scenario results
+    
+    Args:
+        valid_results: List of valid scenario results
+        output_dir: Directory to save output
+        show_plot: Whether to display the plot
+    """
+    # Create a visual table for the scenario results
+    plt.figure(figsize=(12, len(valid_results) * 0.5 + 2))
+    ax = plt.subplot(111, frame_on=False)
+    ax.xaxis.set_visible(False)
+    ax.yaxis.set_visible(False)
+    
+    # Create a subset of columns to display
+    display_cols = ['SPY_Target', 'SPY_Range', 'Paths', 'P_AAPL_gt_MSFT', 'Avg_ValGap']
+    display_data = []
+    col_names = ['SPY Target', 'SPY Range', 'Paths', 'P(AAPL > MSFT)', 'Avg Gap ($B)']
+    
+    for result in valid_results:
+        row = [
+            f"{result['SPY_Target']:.1%}", 
+            result['SPY_Range'], 
+            str(result['Paths']),
+            f"{result['P_AAPL_gt_MSFT']:.2%}",
+            f"{result['Avg_ValGap']:.2f}"
+        ]
+        display_data.append(row)
+    
+    table = plt.table(
+        cellText=display_data,
+        colLabels=col_names,
+        cellLoc='center',
+        loc='center',
+        bbox=[0, 0, 1, 1]
+    )
+    
+    table.auto_set_font_size(False)
+    table.set_fontsize(12)
+    table.scale(1, 1.5)
+    
+    plt.title("Scenario Analysis Summary", fontsize=16, pad=20)
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/scenario_summary_table.png", dpi=300)
+    if show_plot:
+        plt.show()
+
+
+def create_valuation_gap_scatter_plot(spy_returns, valuation_gaps, output_dir, show_plot: bool = False):
+    """
+    Create a scatter plot of valuation gap against SPY returns
     
     Args:
         spy_returns: Array of SPY returns
         valuation_gaps: Array of valuation gaps
-        output_dir: Directory to save output files
-        show_plot: Whether to show plot in popup window
+        output_dir: Directory to save output
+        show_plot: Whether to display the plot
     """
-    if not PLOTLY_AVAILABLE:
-        print("Plotly not available, creating Matplotlib version of valuation gap scatter")
-        # Create with matplotlib
-        plt.figure(figsize=(10, 6))
-        plt.scatter(spy_returns, valuation_gaps, alpha=0.5)
-        plt.axhline(y=0, color='red', linestyle='--')
-        plt.xlabel('SPY Return')
-        plt.ylabel('MSFT-AAPL Valuation Gap ($B)')
-        plt.title('SPY Return vs MSFT-AAPL Valuation Gap')
-        
-        # Add linear regression
-        slope, intercept = np.polyfit(spy_returns, valuation_gaps, 1)
-        x_line = np.linspace(np.min(spy_returns), np.max(spy_returns), 100)
-        y_line = slope * x_line + intercept
-        plt.plot(x_line, y_line, color='green')
-        
-        # Add text with slope info
-        plt.text(0.05, 0.95, f"Slope: ${slope/0.01:.2f}B per 1% SPY move", 
-                transform=plt.gca().transAxes, verticalalignment='top')
-        
-        plt.savefig(f"{output_dir}/valuation_gap_scatter.png", dpi=300)
-        
-        if show_plot:
-            plt.show()
-        else:
-            plt.close()
-        
-        return
+    # Calculate a linear regression fit
+    slope, intercept = np.polyfit(spy_returns, valuation_gaps, 1)
     
-    # Use plotly for interactive version
-    fig = go.Figure()
-    
-    # Add scatter plot
-    fig.add_trace(go.Scatter(
-        x=spy_returns,
-        y=valuation_gaps,
-        mode='markers',
-        marker=dict(
-            size=6,
-            opacity=0.6,
-            colorscale='Viridis',
-            color=valuation_gaps,
-            colorbar=dict(title="Valuation Gap ($B)")
-        ),
-        name='Simulations'
-    ))
-    
-    # Add zero line
-    fig.add_shape(
-        type="line",
-        x0=np.min(spy_returns),
-        y0=0,
-        x1=np.max(spy_returns),
-        y1=0,
-        line=dict(color="red", width=2, dash="dash")
-    )
+    # Create plot
+    plt.figure(figsize=(12, 8))
+    plt.scatter(spy_returns * 100, valuation_gaps, alpha=0.3)
+    plt.axhline(y=0, color='red', linestyle='--', label='Break-even Line')
     
     # Add regression line
-    slope, intercept = np.polyfit(spy_returns, valuation_gaps, 1)
-    x_line = np.linspace(np.min(spy_returns), np.max(spy_returns), 100)
-    y_line = slope * x_line + intercept
+    x_range = np.linspace(min(spy_returns), max(spy_returns), 100)
+    plt.plot(x_range * 100, slope * x_range + intercept, 'g-', 
+             label=f'Fit: Gap = {slope:.2f}B × SPY% + {intercept:.2f}B')
     
-    fig.add_trace(go.Scatter(
-        x=x_line,
-        y=y_line,
-        mode='lines',
-        line=dict(color="green", width=3),
-        name='Regression Line'
-    ))
+    plt.xlabel('SPY Return (%)', fontsize=12)
+    plt.ylabel('Valuation Gap ($ Billions)', fontsize=12)
+    plt.title('Relationship Between SPY Returns and Valuation Gap', fontsize=14)
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/spy_vs_valuation_gap.png", dpi=300)
+    if show_plot:
+        plt.show()
+        
+    # Print relationship
+    print(f"\nRelationship between SPY return and valuation gap:")
+    print(f"For each 1% change in SPY return, the valuation gap changes by ${slope:.2f}B")
+
+
+def create_detailed_scenario_grid(delta_matrix, outcome_matrix, msft_scenarios, aapl_scenarios, output_dir):
+    """
+    Create detailed scenario grid visualizations
     
-    # Create bins and calculate P(AAPL>MSFT) for each bin
-    spy_bins = np.linspace(np.min(spy_returns), np.max(spy_returns), 15)
-    bin_centers = []
-    probs = []
+    Args:
+        delta_matrix: 2D array of valuation deltas for each scenario
+        outcome_matrix: 2D array of outcomes (1 for MSFT > AAPL, 0 for AAPL > MSFT)
+        msft_scenarios: List of MSFT return scenarios
+        aapl_scenarios: List of AAPL return scenarios
+        output_dir: Directory to save output
+    """
+    # Create heatmaps for delta and outcomes
+    fig, axes = plt.subplots(1, 2, figsize=(24, 12))
     
-    for i in range(len(spy_bins)-1):
-        lower, upper = spy_bins[i], spy_bins[i+1]
-        mask = (spy_returns >= lower) & (spy_returns <= upper)
-        if np.sum(mask) > 20:  # Require at least 20 samples
-            prob = np.mean(valuation_gaps[mask] < 0)
-            bin_centers.append((lower + upper) / 2)
-            probs.append(prob)
+    # Delta heatmap
+    im0 = axes[0].imshow(
+        delta_matrix, 
+        cmap='RdYlGn', 
+        interpolation='none',
+        aspect='auto',
+        vmin=-max(abs(np.min(delta_matrix)), abs(np.max(delta_matrix))),
+        vmax=max(abs(np.min(delta_matrix)), abs(np.max(delta_matrix)))
+    )
     
-    # Add a trace for P(AAPL>MSFT)
-    if bin_centers:
-        fig.add_trace(go.Scatter(
-            x=bin_centers,
-            y=[-np.max(np.abs(valuation_gaps))*0.9] * len(bin_centers),  # Position at bottom
-            text=[f"P(AAPL>MSFT)={p:.2f}" for p in probs],
-            mode="markers+text",
-            marker=dict(
-                size=8,
-                color=probs,
-                colorscale="RdBu_r",
-                cmin=0,
-                cmax=1,
-                cmid=0.5,
-                line=dict(width=2, color="black")
-            ),
-            textposition="top center",
-            name="P(AAPL>MSFT)",
-            showlegend=False
-        ))
+    # Mark the zero-crossover boundary with a contour line
+    CS = axes[0].contour(
+        np.arange(len(msft_scenarios)), 
+        np.arange(len(aapl_scenarios)), 
+        delta_matrix, 
+        levels=[0], 
+        colors='black', 
+        linewidths=2
+    )
     
-    # Update layout
-    spy_range = max(abs(np.min(spy_returns)), abs(np.max(spy_returns)))
-    fig.update_layout(
-        title=f"SPY Returns vs MSFT-AAPL Valuation Gap (${slope/0.01:.2f}B per 1% SPY)",
-        xaxis_title="SPY Return",
-        yaxis_title="MSFT-AAPL Valuation Gap ($B)",
-        hovermode="closest",
-        xaxis=dict(
-            zeroline=True,
-            zerolinecolor="black",
-            zerolinewidth=1,
-            range=[-spy_range, spy_range]  # Symmetrical range
-        ),
-        yaxis=dict(
-            zeroline=True,
-            zerolinecolor="black",
-            zerolinewidth=1
-        ),
-        annotations=[
-            dict(
-                x=0.95,
-                y=0.95,
-                xref="paper",
-                yref="paper",
-                text=f"Slope: ${slope/0.01:.2f}B per 1% SPY",
-                showarrow=False,
-                bgcolor="white",
-                borderpad=4
-            )
+    # Set ticks and labels
+    step = 5  # Show every 5th label to avoid crowding
+    axes[0].set_xticks(np.arange(0, len(msft_scenarios), step))
+    axes[0].set_yticks(np.arange(0, len(aapl_scenarios), step))
+    axes[0].set_xticklabels([f"{x:.0%}" for x in msft_scenarios[::step]])
+    axes[0].set_yticklabels([f"{y:.0%}" for y in aapl_scenarios[::step]])
+    
+    # Add labels and title
+    axes[0].set_xlabel('MSFT Return', fontsize=14)
+    axes[0].set_ylabel('AAPL Return', fontsize=14)
+    axes[0].set_title('Market Cap Delta (MSFT - AAPL) in $ Billions', fontsize=16)
+    
+    # Add colorbar
+    cbar0 = plt.colorbar(im0, ax=axes[0])
+    cbar0.set_label('$ Billions', rotation=270, labelpad=20, fontsize=12)
+    
+    # Outcome heatmap (binary: MSFT > AAPL or not)
+    im1 = axes[1].imshow(outcome_matrix, cmap='RdYlGn', interpolation='none', aspect='auto')
+    
+    # Set ticks and labels
+    axes[1].set_xticks(np.arange(0, len(msft_scenarios), step))
+    axes[1].set_yticks(np.arange(0, len(aapl_scenarios), step))
+    axes[1].set_xticklabels([f"{x:.0%}" for x in msft_scenarios[::step]])
+    axes[1].set_yticklabels([f"{y:.0%}" for y in aapl_scenarios[::step]])
+    
+    # Add labels and title
+    axes[1].set_xlabel('MSFT Return', fontsize=14)
+    axes[1].set_ylabel('AAPL Return', fontsize=14)
+    axes[1].set_title('Outcome: MSFT Market Cap > AAPL Market Cap', fontsize=16)
+    
+    # Add colorbar with custom labels
+    cbar1 = plt.colorbar(im1, ax=axes[1], ticks=[0, 1])
+    cbar1.set_ticklabels(['AAPL > MSFT', 'MSFT > AAPL'])
+    
+    # Add the decision boundary
+    CS = axes[1].contour(
+        np.arange(len(msft_scenarios)), 
+        np.arange(len(aapl_scenarios)), 
+        outcome_matrix, 
+        levels=[0.5], 
+        colors='black', 
+        linewidths=2
+    )
+    axes[1].clabel(CS, inline=1, fontsize=10, fmt='Decision\nBoundary')
+    
+    # Adjust layout and save
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/detailed_scenario_grid.png", dpi=300)
+
+
+def create_zoomed_scenario_grid(delta_matrix, msft_scenarios, aapl_scenarios, output_dir, 
+                                zoom_min=-0.05, zoom_max=0.05):
+    """
+    Create a zoomed-in scenario grid focused on the most relevant return range
+    
+    Args:
+        delta_matrix: 2D array of valuation deltas for each scenario
+        msft_scenarios: List of MSFT return scenarios
+        aapl_scenarios: List of AAPL return scenarios
+        output_dir: Directory to save output
+        zoom_min: Minimum return to include in zoom
+        zoom_max: Maximum return to include in zoom
+    """
+    plt.figure(figsize=(15, 15))
+    
+    # Find indices for the zoom region
+    msft_min_idx = next((i for i, x in enumerate(msft_scenarios) if x >= zoom_min), 0)
+    msft_max_idx = next((i for i, x in enumerate(msft_scenarios) if x > zoom_max), len(msft_scenarios)) - 1
+    aapl_min_idx = next((i for i, x in enumerate(aapl_scenarios) if x >= zoom_min), 0)
+    aapl_max_idx = next((i for i, x in enumerate(aapl_scenarios) if x > zoom_max), len(aapl_scenarios)) - 1
+    
+    # Extract the zoom region
+    zoom_delta = delta_matrix[aapl_min_idx:aapl_max_idx+1, msft_min_idx:msft_max_idx+1]
+    zoom_msft = msft_scenarios[msft_min_idx:msft_max_idx+1]
+    zoom_aapl = aapl_scenarios[aapl_min_idx:aapl_max_idx+1]
+    
+    # Handle NaN values
+    zoom_delta_clean = np.nan_to_num(zoom_delta, nan=0.0)
+    
+    # Calculate bounds while avoiding division by zero
+    if np.any(zoom_delta_clean != 0):
+        vmin = -max(abs(np.nanmin(zoom_delta_clean)), abs(np.nanmax(zoom_delta_clean)))
+        vmax = max(abs(np.nanmin(zoom_delta_clean)), abs(np.nanmax(zoom_delta_clean)))
+    else:
+        vmin = -1
+        vmax = 1
+    
+    # Create the zoomed heatmap
+    im = plt.imshow(
+        zoom_delta_clean, 
+        cmap='RdYlGn', 
+        interpolation='none',
+        aspect='auto',
+        vmin=vmin,
+        vmax=vmax,
+        extent=[
+            msft_scenarios[msft_min_idx]*100, 
+            msft_scenarios[msft_max_idx]*100, 
+            aapl_scenarios[aapl_min_idx]*100, 
+            aapl_scenarios[aapl_max_idx]*100
         ]
     )
     
-    # Save as HTML
-    fig.write_html(f"{output_dir}/valuation_gap_contour.html")
+    # Add contour line for the decision boundary
+    plt.contour(
+        np.linspace(zoom_msft[0]*100, zoom_msft[-1]*100, len(zoom_msft)),
+        np.linspace(zoom_aapl[0]*100, zoom_aapl[-1]*100, len(zoom_aapl)),
+        zoom_delta_clean,
+        levels=[0],
+        colors='black',
+        linewidths=2
+    )
     
-    # Show plot if requested
-    if show_plot:
-        fig.show()
+    # Add grid lines
+    plt.grid(alpha=0.3)
+    
+    # Add labels and title
+    plt.xlabel('MSFT Return (%)', fontsize=14)
+    plt.ylabel('AAPL Return (%)', fontsize=14)
+    plt.title('Zoomed Market Cap Delta (±5% Return Range)', fontsize=16)
+    
+    # Add colorbar with explicit reference to the image
+    cbar = plt.colorbar(im)
+    cbar.set_label('$ Billions', rotation=270, labelpad=20, fontsize=12)
+    
+    # Add annotations for key points
+    for i, msft_ret in enumerate(zoom_msft):
+        for j, aapl_ret in enumerate(zoom_aapl):
+            # Only annotate select points to avoid overcrowding
+            if i % 2 == 0 and j % 2 == 0:
+                value = zoom_delta_clean[j, i]
+                if not np.isnan(value):
+                    plt.text(
+                        msft_ret*100, 
+                        aapl_ret*100, 
+                        f"{value:.1f}",
+                        ha='center', 
+                        va='center', 
+                        fontsize=7,
+                        color='black' if abs(value) < vmax/2 else 'white'
+                    )
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/zoomed_scenario_grid.png", dpi=300)
+
+
+def create_scenario_surface_3d(delta_matrix, msft_scenarios, aapl_scenarios, output_dir):
+    """
+    Create an interactive 3D surface visualization of the scenario deltas
+    
+    Args:
+        delta_matrix: 2D array of valuation deltas for each scenario
+        msft_scenarios: List of MSFT return scenarios
+        aapl_scenarios: List of AAPL return scenarios
+        output_dir: Directory to save output
+    """
+    if not PLOTLY_AVAILABLE:
+        print("Warning: Plotly is not available, skipping 3D scenario surface")
+        return
+        
+    try:
+        x_range = np.array(msft_scenarios) * 100  # Convert to percentages
+        y_range = np.array(aapl_scenarios) * 100
+        
+        surface_fig = go.Figure(data=[
+            go.Surface(
+                x=x_range,
+                y=y_range,
+                z=delta_matrix,
+                colorscale='RdYlGn',
+                colorbar=dict(
+                    title="Delta ($ Billions)",
+                    titleside="right"
+                )
+            )
+        ])
+        
+        # Add a plane at z=0 to show the decision boundary
+        x_mesh, y_mesh = np.meshgrid(x_range, y_range)
+        z_plane = np.zeros_like(x_mesh)
+        
+        surface_fig.add_trace(
+            go.Surface(
+                x=x_mesh,
+                y=y_mesh,
+                z=z_plane,
+                showscale=False,
+                opacity=0.7,
+                colorscale=[[0, 'gray'], [1, 'gray']],
+                name="Break-even"
+            )
+        )
+        
+        # Update layout
+        surface_fig.update_layout(
+            title='3D Surface: Market Cap Delta (MSFT - AAPL)',
+            scene=dict(
+                xaxis_title='MSFT Return (%)',
+                yaxis_title='AAPL Return (%)',
+                zaxis_title='Market Cap Delta ($ Billions)'
+            ),
+            autosize=False,
+            width=1000,
+            height=800
+        )
+        
+        # Save as HTML
+        surface_fig.write_html(f"{output_dir}/scenario_surface_3d.html")
+    except Exception as e:
+        print(f"Warning: Could not create 3D scenario surface: {e}")
+
+
+def create_final_summary_table(results, output_dir):
+    """
+    Create a final summary table with key results
+    
+    Args:
+        results: Dictionary with results
+        output_dir: Directory to save output
+    """
+    # Create a summary table
+    summary_stats = {
+        'Model': ['GBM', 'GARCH'],
+        'Probability MSFT > AAPL': [
+            f"{results['prob_gbm_positive_final']:.2%}",
+            f"{results['prob_garch_positive_final']:.2%}"
+        ],
+        'Notes': [
+            'Assumes constant volatility',
+            'Models time-varying volatility & fat tails'
+        ]
+    }
+    
+    summary_df = pd.DataFrame(summary_stats)
+    
+    # Create visual table for summary
+    plt.figure(figsize=(10, 3))
+    ax = plt.subplot(111, frame_on=False)
+    ax.xaxis.set_visible(False)
+    ax.yaxis.set_visible(False)
+    
+    table = plt.table(
+        cellText=summary_df.values,
+        colLabels=summary_df.columns,
+        cellLoc='center',
+        loc='center',
+        bbox=[0, 0, 1, 1]
+    )
+    
+    table.auto_set_font_size(False)
+    table.set_fontsize(12)
+    table.scale(1, 1.5)
+    
+    plt.title("Summary: Probability of MSFT Market Cap > AAPL Market Cap (30-Day Horizon)", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/summary_table.png", dpi=300)

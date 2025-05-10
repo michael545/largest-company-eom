@@ -49,7 +49,7 @@ The analysis focuses on predicting the probability that Microsoft's market capit
 
 ## Dependencies
 
-This project requires Python 3.8+ and the following packages:
+This project requires Python 3.8 and the following packages:
 - numpy
 - pandas
 - matplotlib
@@ -62,13 +62,9 @@ See `requirements.txt` for specific version requirements.
 
 ## Results
 
-The analysis produces a comprehensive assessment of the probability that Microsoft's market capitalization will exceed Apple's over a 30-day horizon. Key findings are visualized in the `analysis_output/` directory, including:
+The analysis produces an assessment of the probability that MSFTs market cap will exceed Apple over the next 30-days. Simulation is visualized in the `analysis_output/` folder, including:
 
 - Terminal probability distributions
 - Confidence intervals for market cap delta
 - Decision boundary visualization
-- Detailed scenario grid analysis
-
-## License
-
-MIT License
+- Scenario grid analysis

@@ -1,3 +1,0 @@
-"""
-Financial analysis models package
-"""
